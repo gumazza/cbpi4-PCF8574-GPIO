@@ -19,8 +19,6 @@ import numpy as np
 import requests
 import warnings
 
-from pcf8574 import PCF8574
-
 logger = logging.getLogger(__name__)
 
 # =====================================================
