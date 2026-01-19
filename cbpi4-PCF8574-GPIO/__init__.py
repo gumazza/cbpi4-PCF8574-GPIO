@@ -12,34 +12,35 @@ from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Props
 from cbpi.api.base import CBPiBase
 
-# --- INÍCIO DO PATCH: controle de estado completo do PCF8574 ---
-# armazena estado atual de todas as saídas do PCF8574 (8 bits)
-_pcf8574_state = 0x00
+# ================= PCF8574 STATE FIX =================
 
-def pcf8574_write_bit(pin_name, value):
+# estado global das 8 saídas (1 = desligado, padrão PCF8574)
+PCF8574_STATE = 0xFF  # tudo desligado
+
+def set_pcf8574_pin(pcf, pin_name, turn_on):
     """
-    Atualiza o estado local e escreve um byte inteiro no PCF8574.
-    pin_name: 'p0'..'p7'
-    value: "HIGH" ou "LOW"
+    pcf       -> instância p1
+    pin_name  -> 'p0' .. 'p7'
+    turn_on   -> True = LIGAR, False = DESLIGAR
     """
-    global _pcf8574_state
-    
-    # converte pin_name em número de bit
-    pin_index = int(pin_name[1:])
-    
-    bit_mask = 1 << pin_index
-    
-    if value in ["HIGH", "1", True]:
-        # seta o bit
-        _pcf8574_state |= bit_mask
+    global PCF8574_STATE
+
+    pin = int(pin_name[1:])
+    mask = 1 << pin
+
+    if turn_on:
+        # LOW = ON
+        PCF8574_STATE &= ~mask
     else:
-        # limpa o bit
-        _pcf8574_state &= ~bit_mask
+        # HIGH = OFF
+        PCF8574_STATE |= mask
 
-    # escreve o byte completo no PCF8574
-    p1.write_byte(_pcf8574_state)
-# --- FIM DO PATCH ---
+    # escreve bit a bit para preservar compatibilidade
+    for i in range(8):
+        level = (PCF8574_STATE >> i) & 0x01
+        pcf.write(f"p{i}", level)
 
+# =====================================================
 
 logger = logging.getLogger(__name__)
 
