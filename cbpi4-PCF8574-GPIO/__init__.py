@@ -12,6 +12,35 @@ from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Props
 from cbpi.api.base import CBPiBase
 
+# --- INÍCIO DO PATCH: controle de estado completo do PCF8574 ---
+# armazena estado atual de todas as saídas do PCF8574 (8 bits)
+_pcf8574_state = 0x00
+
+def pcf8574_write_bit(pin_name, value):
+    """
+    Atualiza o estado local e escreve um byte inteiro no PCF8574.
+    pin_name: 'p0'..'p7'
+    value: "HIGH" ou "LOW"
+    """
+    global _pcf8574_state
+    
+    # converte pin_name em número de bit
+    pin_index = int(pin_name[1:])
+    
+    bit_mask = 1 << pin_index
+    
+    if value in ["HIGH", "1", True]:
+        # seta o bit
+        _pcf8574_state |= bit_mask
+    else:
+        # limpa o bit
+        _pcf8574_state &= ~bit_mask
+
+    # escreve o byte completo no PCF8574
+    p1.write_byte(_pcf8574_state)
+# --- FIM DO PATCH ---
+
+
 logger = logging.getLogger(__name__)
 
 # creates the PCF_IO object only during startup. All sensors are using the same object
@@ -111,7 +140,7 @@ class PCF8574Actor(CBPiActor):
         self.gpio = self.props.get("GPIO", "p0")
         self.sampleTime = int(self.props.get("SamplingTime", 5))
         #p1.pin_mode(self.gpio,"OUTPUT")
-        p1.write(self.gpio, self.p1off)
+        pcf8574_write_bit(self.gpio, self.p1off)
         self.state = False
 
     async def on(self, power = None):
@@ -122,12 +151,12 @@ class PCF8574Actor(CBPiActor):
         await self.set_power(self.power)
 
         logger.info("ACTOR %s ON - GPIO %s " %  (self.id, self.gpio))
-        p1.write(self.gpio, self.p1on)
+        pcf8574_write_bit(self.gpio, self.p1on)
         self.state = True
 
     async def off(self):
         logger.info("ACTOR %s OFF - GPIO %s " % (self.id, self.gpio))
-        p1.write(self.gpio, self.p1off)
+        pcf8574_write_bit(self.gpio, self.p1off)
         self.state = False
 
     def get_state(self):
@@ -140,11 +169,11 @@ class PCF8574Actor(CBPiActor):
                 wait_time=self.sampleTime - heating_time
                 if heating_time > 0:
                     #logging.info("Heating Time: {}".format(heating_time))
-                    p1.write(self.gpio, self.p1on)
+                    pcf8574_write_bit(self.gpio, self.p1on)
                     await asyncio.sleep(heating_time)
                 if wait_time > 0:
                     #logging.info("Wait Time: {}".format(wait_time))
-                    p1.write(self.gpio, self.p1off)
+                    pcf8574_write_bit(self.gpio, self.p1off)
                     await asyncio.sleep(wait_time)
             else:
                 await asyncio.sleep(1)
