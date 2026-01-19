@@ -10,18 +10,22 @@ from cbpi.api.config import ConfigType
 
 logger = logging.getLogger(__name__)
 
+# =========================
+# CONFIGURAÇÃO I2C
+# =========================
 I2C_BUS = 1
 STATE_FILE = "/tmp/pcf8574_state.json"
 
 bus = SMBus(I2C_BUS)
 i2c_lock = asyncio.Lock()
 
-# =========================
-# ESTADO GLOBAL
-# =========================
-PCF_STATE = {}  # { "0x20": 0xFF, "0x21": 0xFF }
+# Estado global: {"0x20": 255, "0x21": 255}
+PCF_STATE = {}
 
 
+# =========================
+# PERSISTÊNCIA
+# =========================
 def load_state():
     global PCF_STATE
     if os.path.exists(STATE_FILE):
@@ -41,32 +45,36 @@ def save_state():
         logger.warning(f"Erro ao salvar estado PCF8574: {e}")
 
 
-async def write_pcf(address):
-    async with i2c_lock:
-        bus.write_byte(address, PCF_STATE[f"0x{address:02X}"])
-        save_state()
-
-
-def ensure_address(address):
+# =========================
+# DRIVER PCF8574
+# =========================
+async def ensure_address(address: int):
     key = f"0x{address:02X}"
+
     if key not in PCF_STATE:
-        PCF_STATE[key] = 0xFF
-        bus.write_byte(address, 0xFF)
-        save_state()
+        PCF_STATE[key] = 0xFF  # todos desligados
+
+    async with i2c_lock:
+        bus.write_byte(address, PCF_STATE[key])
+
+    save_state()
 
 
-async def write_bit(address, pin, value):
+async def write_bit(address: int, pin: str, value: str):
     key = f"0x{address:02X}"
     bit = int(pin.replace("p", ""))
 
-    ensure_address(address)
+    await ensure_address(address)
 
     if value == "LOW":
         PCF_STATE[key] &= ~(1 << bit)
     else:
         PCF_STATE[key] |= (1 << bit)
 
-    await write_pcf(address)
+    async with i2c_lock:
+        bus.write_byte(address, PCF_STATE[key])
+
+    save_state()
 
 
 # =========================
@@ -85,10 +93,16 @@ def setup_settings(cbpi):
 # ACTOR
 # =========================
 @parameters([
-    Property.Select(label="GPIO", options=[f"p{i}" for i in range(8)]),
-    Property.Select(label="PCF Address", options=["0x20","0x21","0x22","0x23","0x24","0x25","0x26","0x27"]),
-    Property.Select(label="Inverted", options=["Yes","No"]),
-    Property.Select(label="SamplingTime", options=[2,5])
+    Property.Select(label="PCF Address",
+        options=["0x20","0x21","0x22","0x23","0x24","0x25","0x26","0x27"]),
+    Property.Select(label="GPIO",
+        options=["p0","p1","p2","p3","p4","p5","p6","p7"]),
+    Property.Select(label="Inverted",
+        options=["Yes","No"],
+        description="Yes = relé ativo em LOW (ULN2803)"),
+    Property.Select(label="SamplingTime",
+        options=[2,5],
+        description="Tempo base PWM")
 ])
 class PCF8574Actor(CBPiActor):
 
@@ -111,18 +125,22 @@ class PCF8574Actor(CBPiActor):
         self.p1on = "LOW" if self.inverted else "HIGH"
         self.p1off = "HIGH" if self.inverted else "LOW"
 
-        ensure_address(self.address)
+        await ensure_address(self.address)
         await write_bit(self.address, self.gpio, self.p1off)
+
+        logger.info(f"PCF8574Actor {self.id} iniciado em {hex(self.address)} {self.gpio}")
 
     async def on(self, power=None):
         self.state = True
         self.power = 100 if power is None else int(power)
+
         await write_bit(self.address, self.gpio, self.p1on)
         await self.set_power(self.power)
 
     async def off(self):
         self.state = False
         self.power = 0
+
         await write_bit(self.address, self.gpio, self.p1off)
         await self.set_power(0)
 
