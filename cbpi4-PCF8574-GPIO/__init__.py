@@ -1,148 +1,135 @@
-
 import asyncio
-import aiohttp
-from aiohttp import web
-from cbpi.api.step import CBPiStep, StepResult
-from cbpi.api.timer import Timer
-from cbpi.api.dataclasses import Kettle, Props
-from datetime import datetime
-import time
-from cbpi.api import *
 import logging
-from socket import timeout
-from typing import KeysView
-from cbpi.api.config import ConfigType
-from cbpi.api.base import CBPiBase
-from voluptuous.schema_builder import message
-from cbpi.api.dataclasses import NotificationAction, NotificationType
-import numpy as np
-import requests
-import warnings
+from smbus2 import SMBus
+
+from cbpi.api import *
+from cbpi.api.base import CBPiActor
 
 logger = logging.getLogger(__name__)
 
-# =====================================================
-# PCF8574 GLOBAL STATE (PCF8574 + ULN2803)
-# LOW  = relé ligado
-# HIGH = relé desligado
-# =====================================================
+# =========================
+# CONFIGURAÇÃO PCF8574
+# =========================
+PCF8574_ADDRESS = 0x20   # ajuste se necessário (0x20–0x27)
+I2C_BUS = 1              # Raspberry Pi geralmente é 1
 
-PCF8574_STATE = 0xFF  # todos desligados ao iniciar
+bus = SMBus(I2C_BUS)
 
-def pcf8574_write_bit(pin_name, level):
-    global PCF8574_STATE
+# Estado GLOBAL do PCF8574 (8 bits)
+# Relés via ULN2803 normalmente são ATIVOS EM LOW
+PCF_STATE = 0xFF  # todos desligados
 
-    pin = int(pin_name[1:])
-    mask = 1 << pin
 
-    if level == "LOW":
-        PCF8574_STATE &= ~mask   # liga relé
+# =========================
+# FUNÇÕES DE BAIXO NÍVEL
+# =========================
+def pcf8574_write_state():
+    global PCF_STATE
+    bus.write_byte(PCF8574_ADDRESS, PCF_STATE)
+
+
+def pcf8574_write_bit(pin, value):
+    """
+    pin: 'p0' até 'p7'
+    value: 'HIGH' ou 'LOW'
+    """
+    global PCF_STATE
+
+    bit = int(pin.replace("p", ""))
+
+    if value == "LOW":
+        PCF_STATE &= ~(1 << bit)   # liga relé
     else:
-        PCF8574_STATE |= mask    # desliga relé
+        PCF_STATE |= (1 << bit)    # desliga relé
 
-    # PCF8574 exige escrita de todos os pinos
-    for i in range(8):
-        bit = (PCF8574_STATE >> i) & 0x01
-        p1.write(f"p{i}", bit)
+    pcf8574_write_state()
 
-# =====================================================
-# PCF8574 CONFIG
-# =====================================================
 
-@parameters([
-    Property.Number(label="I2C Address", configurable=True, default_value=0x20),
-    Property.Number(label="I2C Bus", configurable=True, default_value=1)
-])
-class PCF8574_Config(CBPiExtension):
-
-    async def on_start(self):
-        global p1
-        try:
-            address = int(self.props.get("I2C Address", 0x20))
-            bus = int(self.props.get("I2C Bus", 1))
-            p1 = PCF8574(address, bus)
-            logger.info("PCF8574 iniciado no endereço I2C %s (bus %s)", hex(address), bus)
-        except Exception as e:
-            logger.warning(e)
-        pass
-
-# =====================================================
-# PCF8574 ACTOR
-# =====================================================
-
+# =========================
+# ACTOR CBPI4
+# =========================
 @parameters([
     Property.Select(label="GPIO", options=["p0","p1","p2","p3","p4","p5","p6","p7"]),
-    Property.Select(label="Inverted", options=["Yes", "No"],
-                    description="No: Active on high; Yes: Active on low"),
-    Property.Select(label="SamplingTime", options=[2,5],
-                    description="Time in seconds for power base interval (Default:5)")
+    Property.Select(
+        label="Inverted",
+        options=["Yes", "No"],
+        description="Yes = relé ativo em LOW (ULN2803)"
+    ),
+    Property.Select(
+        label="SamplingTime",
+        options=[2,5],
+        description="Tempo base em segundos (PWM)"
+    )
 ])
 class PCF8574Actor(CBPiActor):
 
-    @action("Set Power", parameters=[
-        Property.Number(label="Power", configurable=True,
-                        description="Power Setting [0-100]")
-    ])
+    @action(
+        "Set Power",
+        parameters=[Property.Number(label="Power", configurable=True, description="0–100 %")]
+    )
     async def setpower(self, Power=100, **kwargs):
         self.power = max(0, min(100, int(Power)))
         await self.set_power(self.power)
 
     async def on_start(self):
-        self.power = None
-        self.inverted = True if self.props.get("Inverted", "No") == "Yes" else False
+        self.power = 0
+        self.state = False
 
-        # ULN2803 + PCF8574
-        self.p1off = "LOW" if not self.inverted else "HIGH"
-        self.p1on  = "HIGH" if not self.inverted else "LOW"
+        self.inverted = True if self.props.get("Inverted", "Yes") == "Yes" else False
+        self.p1off = "HIGH" if self.inverted else "LOW"
+        self.p1on  = "LOW"  if self.inverted else "HIGH"
 
         self.gpio = self.props.get("GPIO", "p0")
         self.sampleTime = int(self.props.get("SamplingTime", 5))
 
-        # garante estado inicial desligado
+        # garante desligado sem afetar os outros
         pcf8574_write_bit(self.gpio, self.p1off)
-        self.state = False
+
+        logger.info(f"PCF8574Actor {self.id} iniciado em {self.gpio}")
 
     async def on(self, power=None):
-        self.power = power if power is not None else 100
-        await self.set_power(self.power)
-
-        logger.info("ACTOR %s ON - GPIO %s", self.id, self.gpio)
-        pcf8574_write_bit(self.gpio, self.p1on)
+        self.power = 100 if power is None else max(0, min(100, int(power)))
         self.state = True
 
+        logger.info(f"ACTOR {self.id} ON - {self.gpio}")
+        pcf8574_write_bit(self.gpio, self.p1on)
+
+        await self.set_power(self.power)
+
     async def off(self):
-        logger.info("ACTOR %s OFF - GPIO %s", self.id, self.gpio)
-        pcf8574_write_bit(self.gpio, self.p1off)
         self.state = False
+        self.power = 0
+
+        logger.info(f"ACTOR {self.id} OFF - {self.gpio}")
+        pcf8574_write_bit(self.gpio, self.p1off)
+
+        await self.set_power(0)
 
     def get_state(self):
         return self.state
 
     async def run(self):
         while self.running:
-            if self.state:
-                heating_time = self.sampleTime * (self.power / 100)
-                wait_time = self.sampleTime - heating_time
+            if self.state and self.power > 0:
+                on_time = self.sampleTime * (self.power / 100)
+                off_time = self.sampleTime - on_time
 
-                if heating_time > 0:
+                if on_time > 0:
                     pcf8574_write_bit(self.gpio, self.p1on)
-                    await asyncio.sleep(heating_time)
+                    await asyncio.sleep(on_time)
 
-                if wait_time > 0:
+                if off_time > 0:
                     pcf8574_write_bit(self.gpio, self.p1off)
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(off_time)
             else:
                 await asyncio.sleep(1)
 
     async def set_power(self, power):
-        self.power = power
         await self.cbpi.actor.actor_update(self.id, power)
-        pass
 
-# =====================================================
-# SETUP
-# =====================================================
 
+# =========================
+# SETUP PLUGIN
+# =========================
 def setup(cbpi):
     cbpi.plugin.register("PCF8574Actor", PCF8574Actor)
-    cbpi.plugin.register("PCF8574_Config", PCF8574_Config)
