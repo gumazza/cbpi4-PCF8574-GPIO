@@ -92,7 +92,7 @@ def setup_settings(cbpi):
 ])
 class PCF8574Actor(CBPiActor):
 
-    @action("Teste Sequencial")
+    @action("Teste Sequencial", parameters=[])
     async def test_sequence(self, **kwargs):
         for i in range(8):
             await write_bit(self.address, f"p{i}", self.p1on)
