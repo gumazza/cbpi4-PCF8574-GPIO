@@ -5,7 +5,7 @@ import logging
 
 from cbpi.api import *
 from cbpi.api.config import *
-from cbpi.api.base import CBPiActor
+from cbpi.api.actor import CBPiActor
 
 from pcf8574 import PCF8574
 
