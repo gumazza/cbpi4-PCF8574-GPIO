@@ -3,7 +3,7 @@ import logging
 from smbus2 import SMBus
 
 from cbpi.api import *
-from cbpi.api.base import CBPiActor
+from cbpi.api.actor import CBPiActor
 
 logger = logging.getLogger(__name__)
 
